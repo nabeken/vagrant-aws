@@ -70,7 +70,7 @@ module VagrantPlugins
                 :private_ip_address => private_ip_address,
                 :subnet_id          => subnet_id,
                 :tags               => tags,
-                :user_data          => user_data
+                :user_data          => user_data,
                 :block_device_mapping => block_device_mapping
               }
               if !security_groups.empty?

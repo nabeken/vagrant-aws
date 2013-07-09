@@ -30,6 +30,10 @@ describe VagrantPlugins::AWS::Config do
     its("user_data")         { should be_nil }
     its("use_iam_profile")   { should be_false }
     its("block_device_mapping")  {should == {} }
+    its("monitoring")        { should be_false }
+    its("spot_instance")     { should be_false }
+    its("spot_max_price")    { should be_nil }
+    its("spot_valid_until")  { should be_nil }
   end
 
   describe "overriding defaults" do
