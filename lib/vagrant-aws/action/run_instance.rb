@@ -1,8 +1,6 @@
 require "log4r"
 require 'json'
-
 require 'vagrant/util/retryable'
-
 require 'vagrant-aws/util/timer'
 
 module VagrantPlugins
@@ -88,25 +86,29 @@ module VagrantPlugins
             options[security_group_key] = security_groups
           end
 
-          begin
-            env[:ui].warn(I18n.t("vagrant_aws.warn_ssh_access")) unless allows_ssh_port?(env, security_groups, subnet_id)
+          if region_config.spot_instance
+            server = server_from_spot_request(env, region_config)
+          else
+            begin
+              env[:ui].warn(I18n.t("vagrant_aws.warn_ssh_access")) unless allows_ssh_port?(env, security_groups, subnet_id)
 
-            server = env[:aws_compute].servers.create(options)
-          rescue Fog::Compute::AWS::NotFound => e
-            # Invalid subnet doesn't have its own error so we catch and
-            # check the error message here.
-            if e.message =~ /subnet ID/
-              raise Errors::FogError,
-                :message => "Subnet ID not found: #{subnet_id}"
+              server = env[:aws_compute].servers.create(options)
+            rescue Fog::Compute::AWS::NotFound => e
+              # Invalid subnet doesn't have its own error so we catch and
+              # check the error message here.
+              if e.message =~ /subnet ID/
+                raise Errors::FogError,
+                  :message => "Subnet ID not found: #{subnet_id}"
+              end
+
+              raise
+            rescue Fog::Compute::AWS::Error => e
+              raise Errors::FogError, :message => e.message
+            rescue Excon::Errors::HTTPStatusError => e
+              raise Errors::InternalFogError,
+                :error => e.message,
+                :response => e.response.body
             end
-
-            raise
-          rescue Fog::Compute::AWS::Error => e
-            raise Errors::FogError, :message => e.message
-          rescue Excon::Errors::HTTPStatusError => e
-            raise Errors::InternalFogError,
-              :error => e.message,
-              :response => e.response.body
           end
 
           # Immediately save the ID since it is created at this point.
@@ -115,26 +117,21 @@ module VagrantPlugins
           # Wait for the instance to be ready first
           env[:metrics]["instance_ready_time"] = Util::Timer.time do
             tries = region_config.instance_ready_timeout / 2
-
             env[:ui].info(I18n.t("vagrant_aws.waiting_for_ready"))
             begin
               retryable(:on => Fog::Errors::TimeoutError, :tries => tries) do
                 # If we're interrupted don't worry about waiting
                 next if env[:interrupted]
-
                 # Wait for the server to be ready
                 server.wait_for(2) { ready? }
               end
             rescue Fog::Errors::TimeoutError
               # Delete the instance
               terminate(env)
-
               # Notify the user
-              raise Errors::InstanceReadyTimeout,
-                timeout: region_config.instance_ready_timeout
+              raise Errors::InstanceReadyTimeout, timeout: region_config.instance_ready_timeout
             end
           end
-
           @logger.info("Time to instance ready: #{env[:metrics]["instance_ready_time"]}")
 
           # Allocate and associate an elastic IP if requested
@@ -154,9 +151,7 @@ module VagrantPlugins
                 sleep 2
               end
             end
-
             @logger.info("Time for SSH ready: #{env[:metrics]["instance_ssh_time"]}")
-
             # Ready and booted!
             env[:ui].info(I18n.t("vagrant_aws.ready"))
           end
@@ -165,6 +160,68 @@ module VagrantPlugins
           terminate(env) if env[:interrupted]
 
           @app.call(env)
+        end
+
+        # returns a fog server or nil
+        def server_from_spot_request(env, config)
+          # prepare request args
+          options = {
+            'InstanceCount'                                  => 1,
+            'LaunchSpecification.KeyName'                    => config.keypair_name,
+            'LaunchSpecification.Monitoring.Enabled'         => config.monitoring,
+            'LaunchSpecification.Placement.AvailabilityZone' => config.availability_zone,
+            # 'LaunchSpecification.EbsOptimized'               => config.ebs_optimized,
+            'LaunchSpecification.UserData'                   => config.user_data,
+            'LaunchSpecification.SubnetId'                   => config.subnet_id,
+            'ValidUntil'                                     => config.spot_valid_until
+          }
+          security_group_key = config.subnet_id.nil? ? 'LaunchSpecification.SecurityGroup' : 'LaunchSpecification.SecurityGroupId'
+          options[security_group_key] = config.security_groups
+          options.delete_if { |key, value| value.nil? }
+
+          env[:ui].info(I18n.t("vagrant_aws.launching_spot_instance"))
+          env[:ui].info(" -- Price: #{config.spot_max_price}")
+          env[:ui].info(" -- Valid until: #{config.spot_valid_until}") if config.spot_valid_until
+          env[:ui].info(" -- Monitoring: #{config.monitoring}") if config.monitoring
+
+          # create the spot instance
+          spot_req = env[:aws_compute].request_spot_instances(
+            config.ami,
+            config.instance_type,
+            config.spot_max_price,
+            options).body["spotInstanceRequestSet"].first
+
+          spot_request_id = spot_req["spotInstanceRequestId"]
+          @logger.info("Spot request ID: #{spot_request_id}")
+          env[:ui].info("Status: #{spot_req["fault"]["message"]}")
+          status_code = spot_req["fault"]["code"] # fog uses "fault" instead of "status"
+          while true
+            sleep 5 # TODO make it a param
+            break if env[:interrupted]
+            spot_req = env[:aws_compute].describe_spot_instance_requests(
+              'spot-instance-request-id' => [spot_request_id]).body["spotInstanceRequestSet"].first
+            # display something whenever the status code changes
+            if status_code != spot_req["fault"]["code"]
+              env[:ui].info("Status: #{spot_req["fault"]["message"]}")
+              status_code = spot_req["fault"]["code"]
+            end
+            spot_state = spot_req["state"].to_sym
+            case spot_state
+            when :not_created, :open
+              @logger.debug("Spot request #{spot_state} #{status_code}, waiting")
+            when :active
+              break; # :)
+            when :closed, :cancelled, :failed
+              @logger.error("Spot request #{spot_state} #{status_code}, aborting")
+              break; # :(
+            else
+              @logger.debug("Unknown spot state #{spot_state} #{status_code}, waiting")
+            end
+          end
+          # cancel the spot request but let the server go thru
+          env[:aws_compute].cancel_spot_instance_requests(spot_request_id)
+          # tries to return a server
+          spot_req["instanceId"] ? env[:aws_compute].servers.get(spot_req["instanceId"]) : nil
         end
 
         def recover(env)
