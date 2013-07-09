@@ -34,6 +34,10 @@ describe VagrantPlugins::AWS::Config do
     its("block_device_mapping")  {should == [] }
     its("elastic_ip")        { should be_nil }
     its("terminate_on_shutdown") { should == false }
+    its("monitoring")        { should be_false }
+    its("spot_instance")     { should be_false }
+    its("spot_max_price")    { should be_nil }
+    its("spot_valid_until")  { should be_nil }
   end
 
   describe "overriding defaults" do
