@@ -200,6 +200,9 @@ module VagrantPlugins
             break if env[:interrupted]
             spot_req = env[:aws_compute].describe_spot_instance_requests(
               'spot-instance-request-id' => [spot_request_id]).body["spotInstanceRequestSet"].first
+            # wait for request open
+            next unless spot_req
+
             # display something whenever the status code changes
             if status_code != spot_req["fault"]["code"]
               env[:ui].info("Status: #{spot_req["fault"]["message"]}")
