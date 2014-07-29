@@ -170,8 +170,8 @@ module VagrantPlugins
 
           spot_request_id = spot_req["spotInstanceRequestId"]
           @logger.info("Spot request ID: #{spot_request_id}")
-          env[:ui].info("Status: #{spot_req["fault"]["message"]}")
-          status_code = spot_req["fault"]["code"] # fog uses "fault" instead of "status"
+          env[:ui].info("Status: #{spot_req["state"]}")
+          status_code = spot_req["state"]
           while true
             sleep 5 # TODO make it a param
             break if env[:interrupted]
@@ -182,9 +182,9 @@ module VagrantPlugins
             next unless spot_req
 
             # display something whenever the status code changes
-            if status_code != spot_req["fault"]["code"]
-              env[:ui].info("Status: #{spot_req["fault"]["message"]}")
-              status_code = spot_req["fault"]["code"]
+            if status_code != spot_req["state"]
+              env[:ui].info("Status has been changed: #{spot_req["state"]}, reason: #{spot_req["fault"]["message"]}")
+              status_code = spot_req["state"]
             end
             spot_state = spot_req["state"].to_sym
             case spot_state
